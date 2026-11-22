@@ -1,14 +1,14 @@
 # Interview_notes_rebuild
 
-面试笔记与复盘整理。
+秋招有点完蛋了，试图自救一下，重新复盘整理
 
 ## 内容
 
-- 待补充
+**八股**
 
 ## 使用
 
-直接用支持 Markdown 的编辑器打开阅读。
+推荐使用**Obisidian**直接打开**./notes**目录
 
 ## License
 
