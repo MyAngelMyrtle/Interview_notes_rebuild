@@ -16,7 +16,7 @@ xStateListItem   // 挂 State List：管理任务状态
 xEventListItem   // 挂 Event List：管理等待事件
 ```
 
-### 1.1.2 State List
+### 1.2 State List
 
 | 分类 | 典型变量 | 作用 |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ xEventListItem   // 挂 Event List：管理等待事件
 | Pending Ready List（待就绪链表） | `xPendingReadyList` | 调度器暂停期间，临时存放已被唤醒的任务 |
 | Termination List（待删除链表） | `xTasksWaitingTermination` | 存放等待 Idle Task 回收资源的已删除任务 |
 
-### 1.1.3 Event List
+### 1.3 Event List
 
 事件等待链表通常属于 Queue、Semaphore、Mutex 等内核对象：
 
@@ -44,9 +44,9 @@ Task TCB
 ```
 
 `xStateListItem` 与 `xEventListItem` 是两个独立节点，因此任务可以同时处于一个状态链表和一个事件链表中；但同一个 `ListItem_t` 在同一时刻只能属于一个 `List_t`。
-# 4 任务创建
+## 2 任务创建
 
-## 4.1 xTaskCreate（动态）
+### 2.1 xTaskCreate（动态）
 
 ```c
 BaseType_t xTaskCreate(
@@ -61,7 +61,7 @@ BaseType_t xTaskCreate(
 
 TCB由内部`pvPortMalloc`自动从`ucHeap`分配，不需要传。
 
-## 4.2 xTaskCreateStatic（静态）
+### 2.2 xTaskCreateStatic（静态）
 
 ```c
 TaskHandle_t xTaskCreateStatic(
@@ -79,7 +79,7 @@ TaskHandle_t xTaskCreateStatic(
 
 > [!warning] 在32位MCU平台，1字 = 32位 = 4字节，在FreeRTOS里面创建任务用字
 
-## 3. 关闭调度器与临界区的区别
+## 3 关闭调度器与临界区的区别
 
 | 对比项      | `vTaskSuspendAll()`           | `taskENTER_CRITICAL()` |
 | -------- | ----------------------------- | ---------------------- |
@@ -94,7 +94,7 @@ TaskHandle_t xTaskCreateStatic(
 
 **SuspendAll 关闭任务调度，仍能计时，taskENTER_CRITICAL关中断，丢Tick**
 
-### BASEPRI 屏蔽谁
+### 3.1 BASEPRI 屏蔽谁
 
 ```c
 #define configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY 5
@@ -119,7 +119,7 @@ vPortExitCritical():  uxCriticalNesting--; if( !uxCriticalNesting ) portENABLE_I
 
 坑：分组必须全给抢占优先级；阈值要写 `5 << 4` 而非 `5`；写 0 等于关闭屏蔽。
 
-## 怎么选
+### 3.2 怎么选
 
 ```text
 与 ISR 共享数据？
@@ -128,20 +128,20 @@ vPortExitCritical():  uxCriticalNesting--; if( !uxCriticalNesting ) portENABLE_I
          操作较长/多对象/要遍历？ → vTaskSuspendAll
 ```
 
-### 坑
+#### 3.2.1 坑
 
 1. SuspendAll 期间禁止阻塞调用（有 `configASSERT`保护，否则可能出现任务被标记为阻塞但继续执行）
 2. SuspendAll **不能**保护与 ISR 共享的数据 —— ISR 照跑、照改就绪链表
 3. Critical 必须短，超过一个节拍就丢 tick
 4. ISR 里两者都不能用，需 `portSET_INTERRUPT_MASK_FROM_ISR()`
 
-## 代价
+### 3.3 代价
 
 | 场景              | 关中断时机   | 结果        |
 | --------------- | ------- | --------- |
 | Critical（N 拍）   | 分散在 N 拍 | 丢节拍，延迟分散  |
 | SuspendAll（N 拍） | 集中在恢复时  | 不丢节拍，延迟集中 |
-## 2 SysTick
+## 4 SysTick
 
 ```c
 void xPortSysTickHandler( void )
@@ -161,7 +161,7 @@ void xPortSysTickHandler( void )
 }
 ```
 
-### 2.1 硬件原理
+### 4.1 硬件原理
 
 24 位硬件递减计数器，中断只是它的可选输出：计数到 0 → 自动重装 → 置 COUNTFLAG → 挂起异常。
 
@@ -172,7 +172,7 @@ void xPortSysTickHandler( void )
 | 硬件触发 | 全程无软件参与，**计时不受任务负载影响** |
 
 `LOAD = 时钟频率 / 节拍频率 - 1`（EGG: 72 MHz + 1 kHz → 71999）。
-## 5.PendSV，SVC
+## 5 PendSV，SVC
 
 ### 5.1 三个专用异常
 
@@ -350,7 +350,9 @@ if( xYieldPending != pdFALSE ) ...
 | `xYieldPending`  | 记录"该切但当时不能切"的欠账                     |
 *callee-saved是啥？*
 
+
 *简单解释一下，通用寄存器分为两组，R0-R3、R12、LR、标志位是**caller-saved**（调用者保存）**R4-R11**、SP属于**callee-saved**（被调用者保存），caller-saved被调用函数可以随意破坏；调用者若想保留，**需要自己提前存**，而callee-saved被调用函数若要用，**必须先保存、返回前恢复**，保证调用前后值不变。为什么这么干呢？因为 **R0-R3、R12**用于传参、返回值、临时计算 —— 每个函数都在用，若由被调用者保存，几乎每个函数都要多存 5 个寄存器，代价巨大。所以约定「谁要跨调用保留，谁自己存」- **R4-R11**被编译器用来放**长期变量**（循环计数器、跨调用的局部变量）。这类变量一旦调用发生就得保留，交给被调用者保存最划算 —— 它只在**真的用到**时才压栈。对于普通中断来说，如果编译器生成的序言使用了**R4-R11**，会自己完成push/pop，但是**在沟槽的任务切换中，没有被调用者能恢复callee-saved**（切换后不会返回原处），所以只能显式地切换。*
+
 
 **这一大坨可以简单了解，我觉得正常人不会问这个**
 
@@ -370,11 +372,109 @@ do { if( xTaskIncrementTick() != pdFALSE ) xYieldPending = pdTRUE; } while( --xP
 xPendedTicks = 0;
 ```
 
-| 方面 | 一次性 +N |
-| --- | --- |
-| 到期扫描 | ✅ 正确（值驱动） |
-| `xNextTaskUnblockTime` | ✅ 正确 |
-| 32 位回绕交换链表 | ❌ 必错（只在 `==0` 时触发） |
-| tick hook 次数 | ❌ 少 N-1 次 |
+| 方面                     | 一次性 +N             |
+| ---------------------- | ------------------ |
+| 到期扫描                   | ✅ 正确（值驱动）          |
+| `xNextTaskUnblockTime` | ✅ 正确               |
+| 32 位回绕交换链表             | ❌ 必错（只在 `==0` 时触发） |
+| tick hook 次数           | ❌ 少 N-1 次          |
 
 逐拍不是为了扫描，而是让**回绕检测与每拍副作用**自动正确；代价是回放期间处于临界区。
+
+## 7 调度方式
+
+### 7.1 三种调度方式简述
+
+- 抢占式：高优先级任务就绪时在最近的调度点抢占当前任务
+- 时间片轮转：同优先级任务按tick轮流运行
+- 协作式：任务不让出CPU，高优先级任务就绪也不能自动抢占，必须等待当前任务阻塞或者主动让出（`taskYIELD()`）
+
+### 7.2 抢占式
+
+每个优先级维护一条`Ready`链表，调度时先找到最高优先级的非空链表
+- 抢占主要在内核调度点发生，场景如下
+- [1]内核API改变任务状态/优先级
+- [2]Systick到期，处理延时超时/时间片
+- [3]任务主动阻塞，删除，挂起或调用`taskYIELD()`
+- [4]ISR唤醒任务后显式调用`portYIELD_FROM_ISR()`
+具体举例：
+
+| 场景 | 内核立即动作 | 实际切换时机 |
+| --- | --- | --- |
+| 任务主动阻塞、延时、删除、挂起 | 通常调用 `portYIELD_WITHIN_API()`，请求 PendSV | 临界区退出后进入 PendSV |
+| 用户调用 `taskYIELD()` | 立即请求 PendSV | 进入 PendSV 后重新选择任务；可能仍选当前任务 |
+| 任务中队列、信号量、通知唤醒高优先级任务 | 抢占开启时自动请求 PendSV | 内核临界区退出后进入 PendSV |
+| 任务创建、恢复、优先级改变 | 仅在更高优先级任务需要运行时请求 PendSV | 临界区退出后进入 PendSV |
+| SysTick 判断需要切换 | SysTick Handler 直接写 `PENDSVSET` | SysTick 退出后进入 PendSV |
+| ISR 调用 `portYIELD_FROM_ISR(pdTRUE)` | ISR 内请求 PendSV | 当前 ISR 退出后进入 PendSV |
+| ISR 唤醒高优先级任务但没调用 `portYIELD_FROM_ISR()` | 只设置 `xYieldPending` | 通常等下一次 SysTick 或其他调度点才请求 PendSV |
+| 调度器被挂起时发生上述调度 | 记录 `xYieldPending` 或 Pending Ready 任务 | `xTaskResumeAll()` 后处理 |
+
+#### 7.2.1 调度器请求延后
+- **临界区通过BASEPRI屏蔽PendSV等低优先级异常**，即使用户在内核API请求Yield，PendSV也需要临界区推出后才能执行
+- **调度器挂起**后不会让任务发生上下文切换，此时PendSV即使执行，也会恢复原任务，等调度器恢复后再处理调度请求
+`vTaskSwitchContext()`源码如下：
+
+```C
+if( uxSchedulerSuspended != pdFALSE )
+{
+    xYieldPending = pdTRUE;
+}
+```
+
+- 如果不想记上面那个表格，可以记这个：
+
+``` 
+任务上下文中的阻塞、删除、挂起和 `taskYIELD()` 会主动请求 PendSV；任务状态或优先级改变只有在高优先级任务需要运行时才请求；SysTick 只在判定需要切换时请求；ISR 则必须在退出前显式调用 `portYIELD_FROM_ISR()`，否则只留下待调度标志，通常等到下一次 SysTick 才处理。
+```
+### 7.3 时间片轮转
+
+每个任务跑1tick周期，然后切换任务。
+
+### 7.4 协作式
+
+任务一旦开始运行，会一直占着CPU，直到它自己主动调用`taskYIELD()`让出，或自己进入阻塞（等信号量等），调度器才有机会切换。**即使有更高优先级的任务已就绪，只要当前任务不主动让，调度器也无法打断它。**
+
+## 8 队列
+
+### 8.1 队列结构
+
+```c
+typedef struct QueueDefinition
+{
+    int8_t *pcHead;          // 队列存储区起始地址
+    int8_t *pcWriteTo;       // 下一个要写入的位置
+    union
+    {
+	    //如果是队列，环形缓冲区
+        struct
+        {
+            int8_t *pcTail;      // 存储区末尾之后的位置，内存哨兵，防止溢出
+            int8_t *pcReadFrom;  // 上一次读取的位置
+        } xQueue;
+        
+        //信号量/互斥量，记录互斥量携带者，递归互斥量数
+        struct
+        {
+            TaskHandle_t xMutexHolder;
+            UBaseType_t uxRecursiveCallCount;
+        } xSemaphore;
+    } u;
+    List_t xTasksWaitingToSend;     // 谁等着发的列表
+    List_t xTasksWaitingToReceive;  // 谁等着收的列表
+    volatile UBaseType_t uxMessagesWaiting; // 当前队列中有效 item个数
+    UBaseType_t uxLength;                   // 队列容量
+    UBaseType_t uxItemSize;                 // 每个 item 大小
+    
+    volatile int8_t cRxLock;
+    volatile int8_t cTxLock;
+} Queue_t;
+```
+
+### 8.2 信号量
+
+### 8.3 互斥量
+
+### 9.任务通知
+
+## 10.从SVC到FreeRTOS第一次启动
