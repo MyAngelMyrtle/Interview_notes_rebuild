@@ -473,8 +473,287 @@ typedef struct QueueDefinition
 
 ### 8.2 信号量
 
+信号量，互斥量本质都是`Queue_t`，区别主要在于以下字段
+
+- `uxLength`：最大容量；
+- `uxMessagesWaiting`：当前容量；
+- `uxItemSize`：三者都为 0，不复制用户数据；
+- `uxQueueType`：区分普通信号量和 mutex；
+- `xMutexHolder`：只有 mutex 使用，记录当前持有者；
+- `uxRecursiveCallCount`：只有递归 mutex 使用。
+
+|对象|`uxLength`|`uxMessagesWaiting`|`uxItemSize`|特殊字段|创建时计数|
+|---|---|---|---|---|---|
+|二值信号量|1|0 或 1|0|无所有者|通常为 0|
+|计数信号量|1～N|0～`uxLength`|0|无所有者|可指定初始值|
+|普通互斥量|1|0 或 1|0|`xMutexHolder`|1|
+|递归互斥量|1|0 或 1|0|`xMutexHolder`、`uxRecursiveCallCount`|1|
+
+它们共用同一组等待链表函数``
+`xTasksWaitingToSend`
+`xTasksWaitingToReceive`
+
+信号量 Take 失败时，任务进入 `xTasksWaitingToReceive`。互斥量 Take 失败时使用同一套等待链表。
+
+|                       | 二值信号量  | 计数信号量         |
+| --------------------- | ------ | ------------- |
+| 队列长度                  | 1      | max_count     |
+| `uxMessagesWaiting`范围 | 只能是0或1 | 0 ~ max_count |
+
+
+> 信号量要表达的信息只有"有/无"，完全由`uxMessagesWaiting`这一个计数器承载，不需要额外的数据存储空间。`xSemaphoreGive`本质是`xQueueSend(sem, NULL, 0, ...)`（不拷贝数据，只让计数器+1）；`xSemaphoreTake`本质是`xQueueReceive`（计数器-1）。
+
+### 8.2.1 二值信号量
+
+- 任意任务或合法 ISR 都能 Give；
+- Give 和 Take 不需要是同一任务；
+- 已经为 1 时再次 Give，返回 `errQUEUE_FULL`。
+
+*现代`xSemaphoreCreateBinary()`创建后是空的（uxMessagesWaiting = 0），需要手动Give后才为1*
+
+应用：
+
+|场景|使用方式|
+|---|---|
+|ISR 通知任务|ISR Give，任务 Take|
+|一次性事件|任务或 ISR Give，任务 Take|
+|中断下半部触发|ISR 唤醒处理任务|
+|两个任务简单同步|一方 Give，另一方 Take|
+|表示“条件已经满足”|不传递实际数据|
+
+### 8.2 计数信号量
+
+- 每次 Give/Take 增加/消耗一个容量；
+- 一次计数只能唤醒一个等待任务；
+- 达到最大计数后再次 Give，返回 `errQUEUE_FULL`。
+
+初始化时直接保存初始计数`uxMessagesWaiting = uxInitialCount;`
+
+|场景|例子|
+|---|---|
+|管理 N 个相同资源|5 个 DMA buffer、4 个连接槽位|
+|生产者/消费者计数|生产者 Give，消费者 Take|
+|统计事件数量|每发生一次事件增加一个 token|
+|限制并发数量|创建 N 个许可，每个任务 Take 一个|
+|ISR 脉冲计数|多次中断累计为多个 token|
+
 ### 8.3 互斥量
 
-### 9.任务通知
+- 创建后计数`uxMessagesWaiting`为 1，表示锁可用；
+- `xMutexHolder` 记录当前持有者；
+- TCB 的 `uxMutexesHeld` 记录任务持有多少把 mutex；
+- 获取成功后设置持有者；
+- 释放时清除持有者；
+- 支持优先级继承；
+- 不能用于 ISR；
+- 不能把一个任务获取的 mutex 交给另一个任务 Give。
+
+| 场景         | 例子                |
+| ---------- | ----------------- |
+| 保护共享变量     | 全局配置结构体           |
+| 保护外设访问     | SPI、I2C、串口总线      |
+| 保护状态机      | 多个任务修改同一状态        |
+| 保护文件或协议上下文 | 网络连接状态、Modbus 上下文 |
+| 任务间互斥访问资源  | 同一资源的读写保护         |
+
+### 8.4 三个对象从Give到Take的内核路径
+
+```
+Give
+    -> 修改 uxMessagesWaiting
+    -> 检查等待者
+    -> 唤醒最高优先级等待者
+    -> 加入 Ready List
+    -> 必要时(即唤醒的任务优先级更高时) PendSV
+
+Take
+    -> 检查 uxMessagesWaiting
+    -> 有 token 则消耗（否则进入Delay链表或者Suspend链表）
+    -> 返回成功
+
+```
+
+总结：
+
+|问题|二值信号量|计数信号量|互斥量|
+|---|---|---|---|
+|是否保存数据|否|否|否|
+|token 最大数量|1|N|1|
+|是否记录所有者|否|否|是|
+|Give/Take 是否需同一任务|否|否|通常必须|
+|是否支持优先级继承|否|否|是|
+|是否可用于 ISR|可以|可以|不可以|
+|Give 已满时|失败|失败|正常持有者不应重复 Give|
+|主要用途|事件同步|资源计数|共享资源保护
+
+### 8.5 递归互斥量(Recursive Mutex)
+
+普通互斥量 `xSemaphoreTake` **不允许同一任务重入**——同一个任务对同一把锁 take 两次会自己把自己卡死。
+
+典型触发场景:**驱动层函数自带加锁**,而**业务层又想把多次驱动调用包成一个原子操作**,导致同一个任务对同一把锁嵌套 take。
+
+- 普通互斥量的语义是:**"锁是否空闲"决定能不能拿**,不关心请求者是谁。
+- 递归互斥量的语义是:**"锁是否空闲,或者持有者是不是我自己"决定能不能拿**——多了一层"身份识别"。
+
+## 9.任务通知
+
+任务通知是 FreeRTOS 中最轻量的任务间同步机制。它没有独立内核对象，通知值和通知状态直接嵌在目标任务 TCB 中，适合点对点通知、轻量计数和携带 32 位状态值。
+
+- `ulNotifiedValue`:一个(或多个,新版支持多组通知)32位整数,存"通知的内容"
+- `ucNotifyState`:三态标记,`taskNOT_WAITING_NOTIFICATION` / `taskWAITING_NOTIFICATION` / `taskNOTIFICATION_RECEIVED
+
+- 一个通知索引只能有一个接收任务
+- 不能排队保存多个数据项
+- 覆盖可能丢数据
+- 通知计数可能回绕
+- 依赖目标任务生命周期
+
+| 场景           | 是否适合         |
+| ------------ | ------------ |
+| ISR 通知指定任务   | 非常适合         |
+| 任务给另一个任务发命令码 | 非常适合         |
+| 一个消费者统计事件数量  | 适合           |
+| 降低 RAM 和切换开销 | 适合           |
 
 ## 10.从SVC到FreeRTOS第一次启动
+
+### 10.1 启动过程
+
+#### 1. 创建 Idle Task，进入移植层启动函数
+
+`vTaskStartScheduler()` 至少会创建 Idle Task。如果启用了软件定时器，还会创建 Timer Task。
+
+然后关闭中断并调用：
+
+```
+xPortStartScheduler();
+```
+
+#### 2. 配置 PendSV、SysTick，启动节拍
+
+`xPortStartScheduler()` 会：
+
+1. 把 PendSV 和 SysTick 设为最低中断优先级；
+2. 配置 SysTick；
+3. 初始化临界区嵌套计数；
+4. 调用 `prvPortStartFirstTask()`。
+
+源码：
+
+```
+portNVIC_SHPR3_REG |= portNVIC_PENDSV_PRI;
+portNVIC_SHPR3_REG |= portNVIC_SYSTICK_PRI;
+
+vPortSetupTimerInterrupt();
+
+uxCriticalNesting = 0;
+
+prvPortStartFirstTask();
+```
+
+见 [port.c (line 335)](D:/Users/86137/Desktop/2027秋招/FreeRTOS/Despacito/006/FreeRTOS/port/port.c:335)。
+
+#### 3. 执行 `svc 0`
+
+`prvPortStartFirstTask()` 的关键汇编：
+
+```
+ldr r0, =0xE000ED08
+ldr r0, [r0]
+ldr r0, [r0]
+msr msp, r0
+cpsie i
+cpsie f
+dsb
+isb
+svc 0
+```
+
+含义：
+
+|指令|作用|
+|---|---|
+|`0xE000ED08`|VTOR，异常向量表地址|
+|两次 `ldr`|取得复位时保存的初始 MSP|
+|`msr msp, r0`|恢复 MSP|
+|`cpsie i/f`|开普通中断和 Fault 中断|
+|`svc 0`|主动触发 SVC 异常|
+
+#### 4. SVC Handler 设置任务栈
+
+SVC Handler 执行：
+
+```
+ldr r3, pxCurrentTCB
+ldr r1, [r3]
+ldr r0, [r1]
+ldmia r0!, {r4-r11}
+msr psp, r0
+msr basepri, #0
+orr r14, #0xd
+bx r14
+```
+
+主要动作：
+
+1. 从 `pxCurrentTCB` 取得第一个任务的 TCB；
+2. 从 TCB 取得任务栈顶；
+3. 恢复 `r4-r11`；
+4. 让 PSP 指向任务栈；
+5. 清零 BASEPRI，重新允许系统调用中断；
+6. 构造 `EXC_RETURN = 0xFFFFFFFD`；
+7. 执行异常返回。
+
+### 5. 异常返回进入第一个任务
+
+```
+orr r14, #0xd
+bx r14
+```
+
+`0xFFFFFFFD` 表示：
+
+|项目|值|
+|---|---|
+|返回模式|Thread Mode|
+|使用栈|PSP|
+|FPU 扩展帧|无|
+
+异常返回时，硬件从 PSP 指向的任务栈弹出：
+
+```
+R0-R3、R12、LR、PC、xPSR
+```
+
+其中 PC 已经被 `pxPortInitialiseStack()` 预先设置为任务函数入口，因此 CPU 开始执行第一个任务函数。
+
+#### 初始任务栈是谁准备的
+
+创建任务时，`pxPortInitialiseStack()` 会手工构造一份“看起来像异常栈帧”的初始栈：
+
+```
+*pxTopOfStack = portINITIAL_XPSR;   /* xPSR */
+*pxTopOfStack = pxCode;             /* PC */
+*pxTopOfStack = portTASK_RETURN_ADDRESS; /* LR */
+*pxTopOfStack = pvParameters;       /* R0 */
+```
+
+
+所以任务函数并不是被普通 C 调用进入的，而是被“异常返回”进入的。
+
+## 为什么要用 SVC
+
+如果直接执行：
+
+```
+firstTask();
+```
+
+会有几个问题：
+
+- 仍使用启动时的 MSP，而不是任务自己的 PSP；
+- 不是从异常返回路径进入任务；
+- 无法利用预先构造的硬件栈帧；
+- 后续上下文切换的约定不统一。
+
+SVC Handler 故意设置 PSP 和 `EXC_RETURN=0xFFFFFFFD`，让硬件把进入第一个任务伪造成一次异常返回。
